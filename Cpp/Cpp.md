@@ -478,3 +478,357 @@ b=a;//此为“赋值”，不会调用拷贝构造函数
 1. 所有的成员变量，要依次拷贝!所有成员变量，不要遗漏
 2. 调用父类的拷贝构造函数!（要么不负责，要么负责全部事情）
 
+## 6、智能指针？
+
+### 1、unique_ptr
+
+这是个独占式的指针对象，在任何时间、资源只能被一个指针占有，当unique_ptr离开作用域，指针所包含的内容会被释放。
+
+unique_ptr 是通过指针占有并管理另一对象，并在 unique_ptr 离开作用域时释放该对象的智能指针。在下列两者之一发生时用关联的删除器释放对象：
+
+- 销毁了管理的 unique_ptr 对象
+- 通过 operator= 或 reset() 赋值另一指针给管理的 unique_ptr 对象。
+
+使用裸指针时，要记得释放内存。
+
+```c++
+{
+    int* p = new int(100);
+    // ...
+    delete p;  // 要记得释放内存
+}
+```
+
+使用 std::unique_ptr 自动管理内存。
+
+```c
+{
+    std::unique_ptr<int> uptr = std::make_unique<int>(200);
+    //...
+    // 离开 uptr 的作用域的时候自动释放内存
+}
+```
+
+std::unique_ptr 是 move-only 的。
+
+```c
+{
+    std::unique_ptr<int> uptr = std::make_unique<int>(200);
+    std::unique_ptr<int> uptr1 = uptr;  // 编译错误，std::unique_ptr<T> 是 move-only 的
+
+    std::unique_ptr<int> uptr2 = std::move(uptr);
+    assert(uptr == nullptr);
+}
+```
+
+std::unique_ptr 可以指向一个数组。
+
+```c
+{
+    std::unique_ptr<int[]> uptr = std::make_unique<int[]>(10);
+    for (int i = 0; i < 10; i++) {
+        uptr[i] = i * i;
+    }   
+    for (int i = 0; i < 10; i++) {
+        std::cout << uptr[i] << std::endl;
+    }   
+}
+```
+
+自定义 deleter。
+
+```c++
+{
+    struct FileCloser {
+        void operator()(FILE* fp) const {
+            if (fp != nullptr) {
+                fclose(fp);
+            }
+        }   
+    };  
+    std::unique_ptr<FILE, FileCloser> uptr(fopen("test_file.txt", "w"));
+}
+```
+
+使用 Lambda 的 deleter。
+
+```c++
+{
+    std::unique_ptr<FILE, std::function<void(FILE*)>> uptr(
+        fopen("test_file.txt", "w"), [](FILE* fp) {
+            fclose(fp);
+        });
+}
+```
+
+### 2、shared_ptr
+
+std::shared_ptr 其实就是对资源做引用计数——当引用计数为 0 的时候，自动释放资源。
+
+```c++
+{
+    std::shared_ptr<int> sptr = std::make_shared<int>(200);
+    assert(sptr.use_count() == 1);  // 此时引用计数为 1
+    {   
+        std::shared_ptr<int> sptr1 = sptr;
+        assert(sptr.get() == sptr1.get());
+        assert(sptr.use_count() == 2);   // sptr 和 sptr1 共享资源，引用计数为 2
+    }   
+    assert(sptr.use_count() == 1);   // sptr1 已经释放
+}
+// use_count 为 0 时自动释放内存
+```
+
+和 unique_ptr 一样，shared_ptr 也可以指向数组和自定义 deleter。
+
+```c++
+{
+    // C++20 才支持 std::make_shared<int[]>
+    // std::shared_ptr<int[]> sptr = std::make_shared<int[]>(100);
+    std::shared_ptr<int[]> sptr(new int[10]);
+    for (int i = 0; i < 10; i++) {
+        sptr[i] = i * i;
+    }   
+    for (int i = 0; i < 10; i++) {
+        std::cout << sptr[i] << std::endl;
+    }   
+}
+
+{
+    std::shared_ptr<FILE> sptr(
+        fopen("test_file.txt", "w"), [](FILE* fp) {
+            std::cout << "close " << fp << std::endl;
+            fclose(fp);
+        });
+}
+```
+
+###### std::shared_ptr 的实现原理
+
+一个 shared_ptr 对象的内存开销要比裸指针和无自定义 deleter 的 unique_ptr 对象略大。
+
+```c++
+  std::cout << sizeof(int*) << std::endl;  // 输出 8
+  std::cout << sizeof(std::unique_ptr<int>) << std::endl;  // 输出 8
+  std::cout << sizeof(std::unique_ptr<FILE, std::function<void(FILE*)>>)
+            << std::endl;  // 输出 40
+
+  std::cout << sizeof(std::shared_ptr<int>) << std::endl;  // 输出 16
+  std::shared_ptr<FILE> sptr(fopen("test_file.txt", "w"), [](FILE* fp) {
+    std::cout << "close " << fp << std::endl;
+    fclose(fp);
+  }); 
+  std::cout << sizeof(sptr) << std::endl;  // 输出 16
+```
+
+无自定义 deleter 的 unique_ptr 只需要将裸指针用 RAII 的手法封装好就行，无需保存其它信息，所以它的开销和裸指针是一样的。如果有自定义 deleter，还需要保存 deleter 的信息。
+
+shared_ptr 需要维护的信息有两部分：
+
+1. 指向共享资源的指针。
+2. 引用计数等共享资源的控制信息——实现上是维护一个指向控制信息的指针。
+
+所以，shared_ptr 对象需要保存两个指针。shared_ptr 的 deleter 是保存在控制信息中，所以，是否有自定义 deleter 不影响 shared_ptr 对象的大小。
+
+当我们创建一个 shared_ptr 时，其实现一般如下：
+
+```c++
+std::shared_ptr<T> sptr1(new T);
+```
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c0fee43dfd6~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+
+
+复制一个 shared_ptr ：
+
+```c++
+std::shared_ptr<T> sptr2 = sptr1;
+```
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c0ff4c0d06a~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+为什么控制信息和每个 shared_ptr 对象都需要保存指向共享资源的指针？可不可以去掉 shared_ptr 对象中指向共享资源的指针，以节省内存开销？
+
+答案是：不能。 因为 shared_ptr 对象中的指针指向的对象不一定和控制块中的指针指向的对象一样。
+
+来看一个例子。
+
+```c++
+struct Fruit {
+    int juice;
+};
+
+struct Vegetable {
+    int fiber;
+};
+
+struct Tomato : public Fruit, Vegetable {
+    int sauce;
+};
+
+ // 由于继承的存在，shared_ptr 可能指向基类对象
+std::shared_ptr<Tomato> tomato = std::make_shared<Tomato>();
+std::shared_ptr<Fruit> fruit = tomato;
+std::shared_ptr<Vegetable> vegetable = tomato;
+```
+
+
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c0fef0e205b~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+
+
+另外，std::shared_ptr 支持 aliasing constructor。
+
+```c++
+template< class Y >
+shared_ptr( const shared_ptr<Y>& r, element_type* ptr ) noexcept;
+```
+
+Aliasing constructor，简单说就是构造出来的 shared_ptr 对象和参数 r 指向同一个控制块（会影响 r 指向的资源的生命周期），但是指向共享资源的指针是参数 ptr。看下面这个例子。
+
+```c++
+using Vec = std::vector<int>;
+std::shared_ptr<int> GetSPtr() {
+    auto elts = {0, 1, 2, 3, 4};
+    std::shared_ptr<Vec> pvec = std::make_shared<Vec>(elts);
+    return std::shared_ptr<int>(pvec, &(*pvec)[2]);
+}
+
+std::shared_ptr<int> sptr = GetSPtr();
+for (int i = -2; i < 3; ++i) {
+    printf("%d\n", sptr.get()[i]);
+}
+```
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c0ff6f5a6d6~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+看上面的例子，使用 std::shared_ptr 时，会涉及两次内存分配：一次分配共享资源对象、一次分配控制块。C++ 标准库提供了 std::make_shared 函数来创建一个 shared_ptr 对象，只需要一次内存分配。
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c0ff8efb560~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+这种情况下，不用通过控制块中的指针，我们也能知道共享资源的位置——这个指针也可以省略掉。
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c0ffa000552~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+
+
+### 3、weak_ptr
+
+std::weak_ptr 要与 std::shared_ptr 一起使用。 一个 std::weak_ptr 对象看做是 std::shared_ptr 对象管理的资源的观察者，它不影响共享资源的生命周期：
+
+1. 如果需要使用 weak_ptr 正在观察的资源，可以将 weak_ptr 提升为 shared_ptr。
+2. 当 shared_ptr 管理的资源被释放时，weak_ptr 会自动变成 nullptr。\
+
+```c
+void Observe(std::weak_ptr<int> wptr) {
+    if (auto sptr = wptr.lock()) {
+        std::cout << "value: " << *sptr << std::endl;
+    } else {
+        std::cout << "wptr lock fail" << std::endl;
+    }
+}
+
+std::weak_ptr<int> wptr;
+{
+    auto sptr = std::make_shared<int>(111);
+    wptr = sptr;
+    Observe(wptr);  // sptr 指向的资源没被释放，wptr 可以成功提升为 shared_ptr
+}
+Observe(wptr);  // sptr 指向的资源已被释放，wptr 无法提升为 shared_ptr
+```
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c100e1d768b~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+当 shared_ptr 析构并释放共享资源的时候，只要 weak_ptr 对象还存在，控制块就会保留，weak_ptr 可以通过控制块观察到对象是否存活。
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c1020142816~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+### 4、enable_shared_from_this
+
+一个类的成员函数如何获得指向自身（this）的 shared_ptr？ 看看下面这个例子有没有问题？
+
+```c++
+class Foo {
+ public:
+  std::shared_ptr<Foo> GetSPtr() {
+    return std::shared_ptr<Foo>(this);
+  }
+};
+
+auto sptr1 = std::make_shared<Foo>();
+assert(sptr1.use_count() == 1);
+auto sptr2 = sptr1->GetSPtr();
+assert(sptr1.use_count() == 1);
+assert(sptr2.use_count() == 1);
+```
+
+上面的代码其实会生成两个独立的 shared_ptr，他们的控制块是独立的，最终导致一个 Foo 对象会被 delete 两次。
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c102982f9ba~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+成员函数获取 this 的 shared_ptr 的正确的做法是继承 std::enable_shared_from_this。
+
+```c++
+class Foo : public std::enable_shared_from_this<Foo> {
+public:
+  std::shared_ptr<Foo> GetSPtr() {
+    return shared_from_this();
+  }
+};
+int main()
+{
+  auto sptr1 = std::make_shared<Foo>();
+  assert(sptr1.use_count() == 1);
+  auto sptr2 = sptr1->GetSPtr();
+  assert(sptr1.use_count() == 2);
+  assert(sptr2.use_count() == 2);
+}
+```
+
+一般情况下，继承了 std::enable_shared_from_this 的子类，成员变量中增加了一个指向 this 的 weak_ptr。这个 weak_ptr 在第一次创建 shared_ptr 的时候会被初始化，指向 this。
+
+![image](https://p1-jj.byteimg.com/tos-cn-i-t2oaga2asx/gold-user-assets/2020/6/24/172e5c10342401b8~tplv-t2oaga2asx-zoom-in-crop-mark:4536:0:0:0.awebp)
+
+
+
+似乎继承了 std::enable_shared_from_this 的类都被强制必须通过 shared_ptr 进行管理。
+
+```c++
+auto b = new Foo;
+auto sptr = b->shared_from_this();
+```
+
+在我的环境下（gcc 7.5.0）上面的代码执行的时候会直接 coredump，而不是返回指向 nullptr 的 shared_ptr：
+
+```c
+terminate called after throwing an instance of 'std::bad_weak_ptr'
+ what():  bad_weak_ptr
+```
+
+转载from：https://juejin.cn/post/6844904198962675719#comment
+
+## 7、内存泄露
+
+###### 什么是内存泄露？
+
+在计算机科学中，内存泄漏指由于疏忽或错误造成程序未能释放已经不再使用的内存。内存泄漏并非指内存在物理上的消失，而是应用程序分配某段内存后，由于设计错误，导致在释放该段内存之前就失去了对该段内存的控制，从而造成了内存的浪费。
+
+在C++中出现内存泄露的主要原因就是程序猿在申请了内存后(`malloc(), new`)，没有及时释放没用的内存空间，甚至消灭了指针导致该区域内存空间根本无法释放。
+
+###### 内存泄漏可能会导致严重的后果：
+
+- 程序运行后，随着时间占用了更多的内存，最后无内存可用而崩溃；
+- 程序消耗了大量的内存，导致其他程序无法正常使用；
+
+###### 如何知道自己的程序存在内存泄露？
+
+根据内存泄露的原因及其恶劣的后果，我们可以通过其主要表现来发现程序是否存在内存泄漏：程序长时间运行后内存占用率一直不断的缓慢的上升，而实际上在你的逻辑中并没有这么多的内存需求。
+
+###### 如何定位到泄露点呢？
+
+1. 根据原理，我们可以先review自己的代码，利用"查找"功能，查询`new`与`delete`，看看内存的申请与释放是不是成对释放的，可以迅速发现一些逻辑较为简单的内存泄露情况。
+2. 如果依旧发生内存泄露，可以通过记录申请与释放的对象数目是否一致来判断。在类中追加一个静态变量 `static int count;`在构造函数中执行`count++;`在析构函数中执行`count--;`，通过在程序结束前将所有类析构，之后输出静态变量，看count的值是否为0，如果为0,则问题并非出现在该处，如果不为0，则是该类型对象没有完全释放。
+3. 检查类中申请的空间是否完全释放，尤其是存在继承父类的情况，看看子类中是否调用了父类的析构函数，有可能会因为子类析构时没有释放父类中申请的内存空间。
+4. 对于函数中申请的临时空间，认真检查，是否存在提前跳出函数的地方没有释放内存。
